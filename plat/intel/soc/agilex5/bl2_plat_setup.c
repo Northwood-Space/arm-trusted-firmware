@@ -30,6 +30,7 @@
 #include "nand/nand.h"
 #include "qspi/cadence_qspi.h"
 #include "sdmmc/sdmmc.h"
+#include "socfpga_dt.h"
 #include "socfpga_emac.h"
 #include "socfpga_f2sdram_manager.h"
 #include "socfpga_handoff.h"
@@ -103,7 +104,7 @@ void bl2_el3_early_platform_setup(u_register_t x0 __unused,
 
 	/* Configure the clock manager */
 	if (config_clkmgr_handoff(&reverse_handoff_ptr)) {
-		ERROR("BL2: Failed to initialize the clock manager\n");
+		ERROR("SOCFPGA: Failed to initialize the clock manager\n");
 		panic();
 	}
 
@@ -127,8 +128,13 @@ void bl2_el3_early_platform_setup(u_register_t x0 __unused,
 	/* DDR and IOSSM driver init */
 	agilex5_ddr_init(&reverse_handoff_ptr);
 
+	if (socfpga_dt_open_and_check(SOCFPGA_DTB_BASE, DT_COMPATIBLE_STR) < 0) {
+		ERROR("SOCFPGA: Failed to open device tree\n");
+		panic();
+	}
+
 	if (combo_phy_init(&reverse_handoff_ptr) != 0) {
-		ERROR("Combo Phy initialization failed\n");
+		ERROR("SOCFPGA: Combo Phy initialization failed\n");
 	}
 
 	/* Enable FPGA bridges as required */
@@ -154,13 +160,13 @@ void bl2_el3_plat_arch_setup(void)
 
 	switch (boot_source) {
 	case BOOT_SOURCE_SDMMC:
-		NOTICE("SDMMC boot\n");
+		NOTICE("SOCFPGA: SDMMC boot\n");
 		sdmmc_init(&reverse_handoff_ptr, &params, &mmc_info);
 		socfpga_io_setup(boot_source, PLAT_SDMMC_DATA_BASE);
 		break;
 
 	case BOOT_SOURCE_QSPI:
-		NOTICE("QSPI boot\n");
+		NOTICE("SOCFPGA: QSPI boot\n");
 		cad_qspi_init(0, QSPI_CONFIG_CPHA, QSPI_CONFIG_CPOL,
 			QSPI_CONFIG_CSDA, QSPI_CONFIG_CSDADS,
 			QSPI_CONFIG_CSEOT, QSPI_CONFIG_CSSOT, 0);
@@ -171,13 +177,13 @@ void bl2_el3_plat_arch_setup(void)
 		break;
 
 	case BOOT_SOURCE_NAND:
-		NOTICE("NAND boot\n");
+		NOTICE("SOCFPGA: NAND boot\n");
 		nand_init(&reverse_handoff_ptr);
 		socfpga_io_setup(boot_source, PLAT_NAND_DATA_BASE);
 		break;
 
 	default:
-		ERROR("Unsupported boot source\n");
+		ERROR("SOCFPGA: Unsupported boot source\n");
 		panic();
 		break;
 	}
@@ -219,7 +225,7 @@ int bl2_plat_handle_post_image_load(unsigned int image_id)
 
 	ret = socfpga_vab_init(image_id);
 	if(ret < 0) {
-		ERROR("SOCFPGA VAB Authentication failed\n");
+		ERROR("SOCFPGA: VAB Authentication failed\n");
 		while (1)
 		wfi();
 	}
