@@ -198,6 +198,9 @@ void bl31_plat_arch_setup(void)
 	NOTICE("SOCFPGA: CPU ID = %x\n", cpuid);
 	INFO("SOCFPGA: Invalidate Data cache\n");
 	invalidate_dcache_all();
+
+	/* Invalidate for NS EL2 and EL1 */
+	plat_invalidate_cache_low_el();
 }
 
 /* Get non-secure image entrypoint for BL33. Zephyr and Linux */
