@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2019-2021, ARM Limited and Contributors. All rights reserved.
  * Copyright (c) 2019-2023, Intel Corporation. All rights reserved.
+ * Copyright (c) 2024, Altera Corporation. All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -30,7 +31,8 @@
 #include "nand/nand.h"
 #include "qspi/cadence_qspi.h"
 #include "sdmmc/sdmmc.h"
-#include "socfpga_dt.h"
+/* TODO: DTB not available */
+// #include "socfpga_dt.h"
 #include "socfpga_emac.h"
 #include "socfpga_f2sdram_manager.h"
 #include "socfpga_handoff.h"
@@ -95,12 +97,21 @@ void bl2_el3_early_platform_setup(u_register_t x0 __unused,
 
 	/* Get the handoff data */
 	if (socfpga_get_handoff(&reverse_handoff_ptr)) {
-		ERROR("BL2: Failed to get the correct handoff data\n");
+		ERROR("SOCFPGA: Failed to initialize the clock manager\n");
 		panic();
 	}
 
 	/* Configure the pinmux */
 	config_pinmux(&reverse_handoff_ptr);
+
+	/* Configure OCRAM to NON SECURE ACCESS */
+	mmio_write_32(OCRAM_REGION_0_REG_BASE, OCRAM_NON_SECURE_ENABLE);
+	mmio_write_32(SOCFPGA_L4_PER_SCR_REG_BASE + SOCFPGA_SDMMC_SECU_BIT,
+		SOCFPGA_SDMMC_SECU_BIT_ENABLE);
+	mmio_write_32(SOCFPGA_L4_SYS_SCR_REG_BASE + SOCFPGA_SDMMC_SECU_BIT,
+		SOCFPGA_SDMMC_SECU_BIT_ENABLE);
+	mmio_write_32(SOCFPGA_LWSOC2FPGA_SCR_REG_BASE,
+		SOCFPGA_LWSOC2FPGA_ENABLE);
 
 	/* Configure the clock manager */
 	if (config_clkmgr_handoff(&reverse_handoff_ptr)) {
@@ -128,10 +139,11 @@ void bl2_el3_early_platform_setup(u_register_t x0 __unused,
 	/* DDR and IOSSM driver init */
 	agilex5_ddr_init(&reverse_handoff_ptr);
 
-	if (socfpga_dt_open_and_check(SOCFPGA_DTB_BASE, DT_COMPATIBLE_STR) < 0) {
-		ERROR("SOCFPGA: Failed to open device tree\n");
-		panic();
-	}
+	/* TODO: DTB not available */
+	//if (socfpga_dt_open_and_check(SOCFPGA_DTB_BASE, DT_COMPATIBLE_STR) < 0) {
+		// ERROR("SOCFPGA: Failed to open device tree\n");
+		// panic();
+	//}
 
 	if (combo_phy_init(&reverse_handoff_ptr) != 0) {
 		ERROR("SOCFPGA: Combo Phy initialization failed\n");
@@ -161,7 +173,7 @@ void bl2_el3_plat_arch_setup(void)
 	switch (boot_source) {
 	case BOOT_SOURCE_SDMMC:
 		NOTICE("SOCFPGA: SDMMC boot\n");
-		sdmmc_init(&reverse_handoff_ptr, &params, &mmc_info);
+		cdns_mmc_init(&params, &mmc_info);
 		socfpga_io_setup(boot_source, PLAT_SDMMC_DATA_BASE);
 		break;
 
