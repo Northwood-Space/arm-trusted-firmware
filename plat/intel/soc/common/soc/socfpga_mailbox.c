@@ -5,6 +5,7 @@
  */
 
 #include <lib/mmio.h>
+#include <lib/spinlock.h>
 #include <common/debug.h>
 #include <drivers/delay_timer.h>
 #include <platform_def.h>
@@ -13,6 +14,20 @@
 #include "socfpga_plat_def.h"
 #include "socfpga_sip_svc.h"
 #include "socfpga_system_manager.h"
+
+#if SIP_SVC_V3
+/* Function prototypes */
+void mailbox_init_v3(void);
+static int mailbox_response_handler_fsm(void);
+static sdm_response_t* mailbox_get_resp_desc(uint8_t client_id, uint8_t job_id, uint8_t *index);
+inline static void mailbox_free_resp_desc(uint8_t index);
+
+static spinlock_t mbox_db_lock;		/* Mailbox service data base lock */
+static spinlock_t mbox_write_lock;	/* Hardware mailbox FIFO write lock */
+static spinlock_t mbox_read_lock;	/* Hardware mailbox FIFO read lock */
+
+static mailbox_service_t mbox_svc;	/* Mailbox service data base */
+#endif /* #if SIP_SVC_V3 */
 
 static mailbox_payload_t mailbox_resp_payload;
 static mailbox_container_t mailbox_resp_ctr = {0, 0, &mailbox_resp_payload};
@@ -83,6 +98,11 @@ static int write_mailbox_cmd_buffer(uint32_t *cin, uint32_t cout,
 	return MBOX_RET_OK;
 }
 
+/*
+ * Function description: Write the command header, and its payload one by one
+ * into the mailbox command buffer. Along with this, check for mailbox buffer
+ * full condition and trigger doorbell to SDM if the command buffer is full.
+ */
 static int fill_mailbox_circular_buffer(uint32_t header_cmd, uint32_t *args,
 					unsigned int len)
 {
@@ -91,15 +111,21 @@ static int fill_mailbox_circular_buffer(uint32_t header_cmd, uint32_t *args,
 	int ret;
 	bool is_doorbell_triggered = false;
 
+#if SIP_SVC_V3
+	spin_lock(&mbox_write_lock);
+#endif
+
 	cmd_free_offset = mmio_read_32(MBOX_OFFSET + MBOX_CIN);
 	sdm_read_offset = mmio_read_32(MBOX_OFFSET + MBOX_COUT);
 
+	/* Write the command header here */
 	ret = write_mailbox_cmd_buffer(&cmd_free_offset, sdm_read_offset,
 				       header_cmd, &is_doorbell_triggered);
 	if (ret != 0) {
 		goto restart_mailbox;
 	}
 
+	/* Write the payload here w.r.to args and its len - one by one. */
 	for (i = 0U; i < len; i++) {
 		is_doorbell_triggered = false;
 		ret = write_mailbox_cmd_buffer(&cmd_free_offset,
@@ -112,6 +138,9 @@ static int fill_mailbox_circular_buffer(uint32_t header_cmd, uint32_t *args,
 
 	mmio_write_32(MBOX_OFFSET + MBOX_DOORBELL_TO_SDM, 1U);
 
+#if SIP_SVC_V3
+	spin_unlock(&mbox_write_lock);
+#endif
 	return MBOX_RET_OK;
 
 restart_mailbox:
@@ -128,6 +157,9 @@ restart_mailbox:
 		}
 	}
 
+#if SIP_SVC_V3
+	spin_unlock(&mbox_write_lock);
+#endif
 	return MBOX_TIMEOUT;
 }
 
@@ -274,7 +306,7 @@ int mailbox_read_response_async(unsigned int *job_id, uint32_t *header,
 }
 
 int mailbox_poll_response(uint32_t job_id, uint32_t urgent, uint32_t *response,
-				unsigned int *resp_len)
+			  unsigned int *resp_len)
 {
 	unsigned int timeout = 40U;
 	unsigned int sdm_loop = 255U;
@@ -284,7 +316,6 @@ int mailbox_poll_response(uint32_t job_id, uint32_t urgent, uint32_t *response,
 	uint32_t resp_data;
 
 	while (sdm_loop != 0U) {
-
 		do {
 			if (mmio_read_32(MBOX_OFFSET + MBOX_DOORBELL_FROM_SDM)
 				== 1U) {
@@ -309,7 +340,7 @@ int mailbox_poll_response(uint32_t job_id, uint32_t urgent, uint32_t *response,
 			}
 
 			mmio_write_32(MBOX_OFFSET + MBOX_URG, 0U);
-			INFO("Error: Mailbox did not get UA");
+			ERROR("MBOX: Mailbox did not get UA");
 			return MBOX_RET_ERROR;
 		}
 
@@ -323,12 +354,20 @@ int mailbox_poll_response(uint32_t job_id, uint32_t urgent, uint32_t *response,
 			rout %= MBOX_RESP_BUFFER_SIZE;
 			mmio_write_32(MBOX_OFFSET + MBOX_ROUT, rout);
 
-			if (MBOX_RESP_CLIENT_ID(resp_data) != MBOX_ATF_CLIENT_ID
-				|| MBOX_RESP_JOB_ID(resp_data) != job_id) {
+			if ((MBOX_RESP_CLIENT_ID(resp_data) != MBOX_ATF_CLIENT_ID) ||
+			    (MBOX_RESP_JOB_ID(resp_data) != job_id)) {
 				continue;
 			}
 
+			/* Get the return response len from the response header. */
 			ret_resp_len = MBOX_RESP_LEN(resp_data);
+
+			/* Print the response header. */
+			VERBOSE("MBOX: Resp Hdr: cid %d, jid %d, len_words %d, error_code 0x%x\n",
+				MBOX_RESP_CLIENT_ID(resp_data),
+				MBOX_RESP_JOB_ID(resp_data),
+				MBOX_RESP_LEN(resp_data),
+				MBOX_RESP_ERR(resp_data));
 
 			if (iterate_resp(ret_resp_len, response, resp_len)
 				!= MBOX_RET_OK) {
@@ -365,8 +404,7 @@ int iterate_resp(uint32_t mbox_resp_len, uint32_t *resp_buf,
 
 		if ((resp_buf != NULL) && (resp_len != NULL)
 			&& (*resp_len != 0U)) {
-			*(resp_buf + total_resp_len)
-					= resp_data;
+			*(resp_buf + total_resp_len) = resp_data;
 			*resp_len = *resp_len - 1;
 			total_resp_len++;
 		}
@@ -432,9 +470,7 @@ int mailbox_send_cmd(uint32_t job_id, uint32_t cmd, uint32_t *args,
 					MBOX_STATUS_UA_MASK;
 		mmio_write_32(MBOX_OFFSET + MBOX_URG, cmd);
 		mmio_write_32(MBOX_OFFSET + MBOX_DOORBELL_TO_SDM, 1U);
-	}
-
-	else {
+	} else {
 		status = fill_mailbox_circular_buffer(
 			MBOX_CLIENT_ID_CMD(MBOX_ATF_CLIENT_ID) |
 			MBOX_JOB_ID_CMD(job_id) |
@@ -459,11 +495,11 @@ void mailbox_clear_response(void)
 
 void mailbox_set_int(uint32_t interrupt)
 {
-
-	mmio_write_32(MBOX_OFFSET+MBOX_INT, MBOX_COE_BIT(interrupt) |
+	mmio_write_32(MBOX_OFFSET+MBOX_INT,
+			MBOX_COE_BIT(interrupt) |
+			MBOX_RIE_BIT(interrupt) |
 			MBOX_UAE_BIT(interrupt));
 }
-
 
 void mailbox_set_qspi_open(void)
 {
@@ -605,6 +641,7 @@ int mailbox_init(void)
 
 	mailbox_set_int(MBOX_INT_FLAG_COE | MBOX_INT_FLAG_RIE |
 			MBOX_INT_FLAG_UAE);
+
 	mmio_write_32(MBOX_OFFSET + MBOX_URG, 0U);
 	mmio_write_32(MBOX_OFFSET + MBOX_DOORBELL_FROM_SDM, 0U);
 
@@ -615,8 +652,12 @@ int mailbox_init(void)
 		return status;
 	}
 
-	mailbox_set_int(MBOX_INT_FLAG_COE | MBOX_INT_FLAG_RIE |
-			MBOX_INT_FLAG_UAE);
+#if SIP_SVC_V3
+	/* Initialize the mailbox version3 implementation */
+	mailbox_init_v3();
+#endif
+
+	mailbox_set_int(MBOX_INT_FLAG_RIE);
 
 	return MBOX_RET_OK;
 }
@@ -729,3 +770,449 @@ int mailbox_safe_inject_seu_err(uint32_t *arg, unsigned int len)
 	return mailbox_send_cmd(MBOX_JOB_ID, MBOX_CMD_SAFE_INJECT_SEU_ERR, arg, len,
 			CMD_CASUAL, NULL, NULL);
 }
+
+
+#if SIP_SVC_V3
+/* Returns the command descriptor based on the client and job ID. */
+static sdm_command_t* mailbox_get_cmd_desc(uint8_t client_id, uint8_t job_id)
+{
+	spin_lock(&mbox_db_lock);
+	for (uint32_t count = 0; count < MBOX_SVC_CMD_QUEUE_SIZE; count++) {
+		if ((mbox_svc.cmd_queue[count].client_id == client_id) &&
+		    (mbox_svc.cmd_queue[count].job_id == job_id) &&
+		    (mbox_svc.cmd_queue[count].flags & MBOX_SVC_CMD_IS_USED)) {
+			spin_unlock(&mbox_db_lock);
+			return &(mbox_svc.cmd_queue[count]);
+		}
+	}
+
+	spin_unlock(&mbox_db_lock);
+	NOTICE("MBOX: Command descriptor not found for cid %d, jid %d\n", client_id, job_id);
+	return NULL;
+}
+
+/* Returns the response descriptor based on the client and job ID. */
+static sdm_response_t* mailbox_get_resp_desc(uint8_t client_id, uint8_t job_id, uint8_t *index)
+{
+	spin_lock(&mbox_db_lock);
+	/*
+	 * Let's first check whether we have a response bitmap set for the given
+	 * client ID and job ID.
+	 */
+	uint8_t transaction_id = MBOX_GET_TRANS_ID(client_id, job_id);
+	if ((mbox_svc.received_bitmap[transaction_id / MBOX_TRANS_ID_BITMAP_SIZE] &
+		(1ULL << (transaction_id % MBOX_TRANS_ID_BITMAP_SIZE))) == 0) {
+		spin_unlock(&mbox_db_lock);
+		INFO("MBOX: Response bitmap not set for cid %d, jid %d, bitmap 0x%16lx\n",
+			client_id, job_id, mbox_svc.received_bitmap[transaction_id / 64]);
+		return NULL;
+	}
+
+	for (uint32_t count = 0; count < MBOX_SVC_RESP_QUEUE_SIZE; count++) {
+		if (mbox_svc.resp_queue[count].flags & FLAG_SDM_RESPONSE_IS_VALID) {
+			if ((mbox_svc.resp_queue[count].client_id == client_id) &&
+			    (mbox_svc.resp_queue[count].job_id == job_id)) {
+				*index = count;
+				mbox_svc.received_bitmap[transaction_id / MBOX_TRANS_ID_BITMAP_SIZE] &=
+								~(1ULL << (transaction_id % MBOX_TRANS_ID_BITMAP_SIZE));
+				mbox_svc.interrupt_bitmap[transaction_id / MBOX_TRANS_ID_BITMAP_SIZE] &=
+								~(1ULL << (transaction_id % MBOX_TRANS_ID_BITMAP_SIZE));
+				spin_unlock(&mbox_db_lock);
+				return &(mbox_svc.resp_queue[count]);
+			}
+		}
+	}
+
+	spin_unlock(&mbox_db_lock);
+	NOTICE("MBOX: Response descriptor not found for cid %d, jid %d\n",client_id, job_id);
+	return NULL;
+}
+
+static int32_t mailbox_get_free_resp_desc(void)
+{
+	spin_lock(&mbox_db_lock);
+	static uint32_t free_index = MBOX_SVC_RESP_QUEUE_SIZE - 1;
+	uint32_t count = 0, try = 0;
+
+	for (try = 0; try < MBOX_SVC_RESP_QUEUE_SIZE; try++) {
+		free_index = (free_index + 1) % MBOX_SVC_RESP_QUEUE_SIZE;
+		if (!(mbox_svc.resp_queue[free_index].flags & FLAG_SDM_RESPONSE_IS_USED)) {
+			count = free_index;
+			spin_unlock(&mbox_db_lock);
+			return count;
+		}
+	}
+
+	/* No free descriptors are available */
+	spin_unlock(&mbox_db_lock);
+	ERROR("MBOX: No free response descriptors available\n");
+	return MBOX_BUFFER_FULL;
+}
+
+static sdm_command_t* mailbox_get_free_cmd_desc(void)
+{
+	spin_lock(&mbox_db_lock);
+	static uint32_t free_index = 0;
+
+	/* Rollover the command queue free index */
+	if(free_index == (MBOX_SVC_CMD_QUEUE_SIZE - 1)) {
+		free_index = 0;
+	}
+
+	for (; free_index < MBOX_SVC_CMD_QUEUE_SIZE; free_index++ ) {
+		if (!(mbox_svc.cmd_queue[free_index].flags & MBOX_SVC_CMD_IS_USED)) {
+			mbox_svc.cmd_queue[free_index].flags |= MBOX_SVC_CMD_IS_USED;
+			spin_unlock(&mbox_db_lock);
+			return &(mbox_svc.cmd_queue[free_index]);
+		}
+	}
+
+	/* No free command descriptors are available */
+	spin_unlock(&mbox_db_lock);
+	ERROR("MBOX: No free command descriptors available\n");
+	return NULL;
+}
+
+inline static void mailbox_free_cmd_desc(sdm_command_t* cmd_desc)
+{
+	spin_lock(&mbox_db_lock);
+	memset ((void *)cmd_desc, 0, sizeof(sdm_command_t));
+	spin_unlock(&mbox_db_lock);
+}
+
+inline static void mailbox_free_resp_desc(uint8_t index)
+{
+	spin_lock(&mbox_db_lock);
+	memset ((void *)&mbox_svc.resp_queue[index], 0, sizeof(sdm_response_t));
+	spin_unlock(&mbox_db_lock);
+}
+
+int mailbox_send_cmd_async_v3(uint8_t client_id, uint8_t job_id, uint32_t cmd, uint32_t *args,
+			      uint32_t args_len, uint8_t cmd_flag, sdm_command_callback cb,
+			      uint32_t* cb_args, uint32_t cb_args_len, uint32_t ret_args_len)
+{
+	int status = 0;
+	sdm_command_t *cmd_desc = NULL;
+
+	VERBOSE("MBOX: cid: %d, jid: %d, cmd: %d, cmd_flag: %d\n",
+		client_id, job_id, cmd, cmd_flag);
+
+	if (IS_CMD_URGENT(cmd_flag)) {
+		mmio_write_32(MBOX_OFFSET + MBOX_URG, cmd);
+		mmio_write_32(MBOX_OFFSET + MBOX_DOORBELL_TO_SDM, 1U);
+	} else {
+		/* Get a free command descriptor */
+		cmd_desc = mailbox_get_free_cmd_desc();
+		if (cmd_desc == NULL) {
+			return MBOX_BUFFER_FULL;
+		}
+
+		/* Record all the given values for the command. */
+		cmd_desc->client_id = client_id;
+		cmd_desc->job_id = job_id;
+		cmd_desc->cb = cb;
+		cmd_desc->cmd_ret_args.ret_args_len = ret_args_len;
+		cmd_desc->cb_args = cb_args;
+		cmd_desc->cb_args_len = cb_args_len;
+
+		/* Push the command to mailbox FIFO */
+		status = fill_mailbox_circular_buffer(
+					MBOX_FRAME_CMD_HEADER(client_id, job_id, args_len, IS_CMD_INDIRECT(cmd_flag), cmd),
+					args,
+					args_len);
+
+		if (status != MBOX_RET_OK) {
+			ERROR("MBOX: Failed to push the command to mailbox FIFO\n");
+			/* Free the command descriptor. */
+			mailbox_free_cmd_desc(cmd_desc);
+		}
+	}
+
+	INFO("MBOX: %s: status: %d\n", __func__, status);
+	return status;
+}
+
+/* SDM response parser handler state machine. */
+static void mailbox_response_parser(void)
+{
+	int di = -1;		/* Descriptor index */
+	uint32_t rin;
+	uint32_t rout;
+
+	switch (mbox_svc.next_resp_state) {
+	case SRS_WAIT_FOR_RESP:
+	{
+		mbox_svc.resp_state = SRS_WAIT_FOR_RESP;
+
+		rin = mmio_read_32(MBOX_OFFSET + MBOX_RIN);
+		rout = mmio_read_32(MBOX_OFFSET + MBOX_ROUT);
+		if (rin != rout) {
+			mbox_svc.next_resp_state = SRS_WAIT_FOR_HEADER;
+		}
+		break;
+	}
+
+	case SRS_WAIT_FOR_HEADER:
+	{
+		mbox_svc.resp_state = SRS_WAIT_FOR_HEADER;
+		uint32_t resp_hdr;
+		uint8_t transaction_id = 0U;
+
+		rin = mmio_read_32(MBOX_OFFSET + MBOX_RIN);
+		rout = mmio_read_32(MBOX_OFFSET + MBOX_ROUT);
+		if (rin != rout) {
+			/* Read the header and dequeue from the queue. */
+			resp_hdr = mmio_read_32(MBOX_ENTRY_TO_ADDR(RESP, (rout)++));
+			rout %= MBOX_RESP_BUFFER_SIZE;
+			mmio_write_32(MBOX_OFFSET + MBOX_ROUT, rout);
+
+			/* Allocate a new response descriptor */
+			di = mailbox_get_free_resp_desc();
+			if (di != -1) {
+				mbox_svc.curr_di = di;
+				mbox_svc.resp_queue[di].header = resp_hdr;
+				mbox_svc.resp_queue[di].client_id = MBOX_RESP_CLIENT_ID(resp_hdr);
+				mbox_svc.resp_queue[di].job_id = MBOX_RESP_JOB_ID(resp_hdr);
+				mbox_svc.resp_queue[di].resp_len = MBOX_RESP_LEN(resp_hdr);
+				mbox_svc.resp_queue[di].flags |= (FLAG_SDM_RESPONSE_IS_USED | FLAG_SDM_RESPONSE_IS_IN_PROGRESS);
+				mbox_svc.resp_queue[di].err_code = MBOX_RESP_ERR(resp_hdr);
+				transaction_id = MBOX_RESP_TRANSACTION_ID(resp_hdr);
+
+				VERBOSE("MBOX: Resp Hdr: cid %d, jid %d, len %d, err_code 0x%x\n",
+					mbox_svc.resp_queue[di].client_id,
+					mbox_svc.resp_queue[di].job_id,
+					mbox_svc.resp_queue[di].resp_len,
+					mbox_svc.resp_queue[di].err_code);
+
+				/* Check if the response is an argument response */
+				if (mbox_svc.resp_queue[di].resp_len > 0) {
+					mbox_svc.next_resp_state = SRS_WAIT_FOR_ARGUMENTS;
+				} else {
+					VERBOSE("MBOX: Received complete response with no arguments\n");
+					/* Non argument response, done */
+					mbox_svc.resp_queue[mbox_svc.curr_di].flags |= FLAG_SDM_RESPONSE_IS_VALID;
+
+					/* Go back to waiting for new response */
+					mbox_svc.next_resp_state = SRS_WAIT_FOR_RESP;
+					mbox_svc.curr_di = -1;
+
+					/* Mark the transaction ID as received */
+					spin_lock(&mbox_db_lock);
+					mbox_svc.received_bitmap[transaction_id / MBOX_TRANS_ID_BITMAP_SIZE] |=
+								(1ULL << (transaction_id % MBOX_TRANS_ID_BITMAP_SIZE));
+					spin_unlock(&mbox_db_lock);
+				}
+			} else {
+				mbox_svc.next_resp_state = SRS_SYNC_ERROR;
+			}
+		}
+		break;
+	}
+
+	case SRS_WAIT_FOR_ARGUMENTS:
+	{
+		mbox_svc.resp_state = SRS_WAIT_FOR_ARGUMENTS;
+		uint16_t mbox_resp_len = mbox_svc.resp_queue[mbox_svc.curr_di].resp_len;
+		uint32_t *read_buff = NULL;
+		uint16_t read_len = 0U;
+		uint16_t read_max_len = 0U;
+		uint32_t timeout = 0U;
+
+		/* Determine where to copy the buffer. */
+		sdm_command_t *cmd_desc = mailbox_get_cmd_desc(mbox_svc.resp_queue[mbox_svc.curr_di].client_id,
+								mbox_svc.resp_queue[mbox_svc.curr_di].job_id);
+		if (cmd_desc != NULL && cmd_desc->cb_args != NULL) {
+			read_buff = cmd_desc->cb_args;
+			read_max_len = mbox_resp_len;
+		} else {
+			read_buff = (uint32_t *)mbox_svc.resp_queue[mbox_svc.curr_di].resp_data;
+			read_max_len = MBOX_SVC_MAX_RESP_DATA_SIZE;
+		}
+
+		rin = mmio_read_32(MBOX_OFFSET + MBOX_RIN);
+		rout = mmio_read_32(MBOX_OFFSET + MBOX_ROUT);
+
+
+		while ((read_len < mbox_resp_len) && (rin != rout) && (read_len < read_max_len)) {
+			timeout = 100U;
+
+			/* Copy the response data to the buffer */
+			read_buff[read_len++] = mmio_read_32(MBOX_ENTRY_TO_ADDR(RESP, (rout)++));
+
+			/* Update the read out buffer index */
+			rout %= MBOX_RESP_BUFFER_SIZE;
+			mmio_write_32(MBOX_OFFSET + MBOX_ROUT, rout);
+
+			/*
+			* The response buffer is of 16 words size, this loop checks
+			* if the response buffer is empty and if empty trigger an
+			* interrupt to SDM and wait for the response buffer to fill
+			*/
+			do {
+				if (read_len == mbox_resp_len) {
+					break;
+				}
+				rin = mmio_read_32(MBOX_OFFSET + MBOX_RIN);
+				if (rout == rin) {
+					mmio_write_32(MBOX_OFFSET + MBOX_DOORBELL_TO_SDM, 1U);
+					udelay(50U);
+				} else {
+					break;
+				}
+				timeout--;
+			} while ((read_len < mbox_resp_len) && (timeout != 0U));
+
+			if (timeout == 0U) {
+				ERROR("MBOX: Timeout waiting for response data\n");
+				mbox_svc.next_resp_state = SRS_SYNC_ERROR;
+				break;
+			}
+		}
+
+		/* Check if we have received all the arguments */
+		mbox_svc.resp_queue[mbox_svc.curr_di].rcvd_resp_len = read_len;
+		if (mbox_resp_len == read_len) {
+			uint8_t transaction_id = ((mbox_svc.resp_queue[mbox_svc.curr_di].client_id << 4) |
+						  (mbox_svc.resp_queue[mbox_svc.curr_di].job_id));
+			VERBOSE("MBOX: Received all the response data len %d, transaction_id %d\n",
+				read_len, transaction_id);
+
+			spin_lock(&mbox_db_lock);
+			mbox_svc.received_bitmap[transaction_id / MBOX_TRANS_ID_BITMAP_SIZE] |=
+						(1ULL << (transaction_id % MBOX_TRANS_ID_BITMAP_SIZE));
+			spin_unlock(&mbox_db_lock);
+
+			mbox_svc.resp_queue[mbox_svc.curr_di].flags |= FLAG_SDM_RESPONSE_IS_VALID;
+			mbox_svc.next_resp_state = SRS_WAIT_FOR_RESP;
+			mbox_svc.curr_di = -1;
+		} else {
+			mbox_svc.next_resp_state = SRS_SYNC_ERROR;
+			VERBOSE("MBOX: Received partial response data len %d, max len %d\n",
+				read_len, read_max_len);
+		}
+		break;
+	}
+
+	case SRS_SYNC_ERROR:
+	{
+		mbox_svc.resp_state = SRS_SYNC_ERROR;
+		ERROR("MBOX: Error in response handling\n");
+		break;
+	}
+
+	default:
+		break;
+	} /* switch */
+}
+
+static int mailbox_response_handler_fsm(void)
+{
+	int status = MBOX_RET_OK;
+
+	spin_lock(&mbox_read_lock);
+	/* Mailbox peripheral response parser */
+	do {
+		/* Iterate till the state machine transition ends */
+		mailbox_response_parser();
+
+		/* Note down if there is any error in the response parsing */
+		if (mbox_svc.next_resp_state == SRS_SYNC_ERROR) {
+			status = MBOX_RET_ERROR;
+		}
+
+	} while (mbox_svc.resp_state != mbox_svc.next_resp_state);
+	spin_unlock(&mbox_read_lock);
+
+	return status;
+}
+
+int mailbox_response_poll_on_intr_v3(uint8_t *client_id, uint8_t *job_id, uint64_t *bitmap)
+{
+	int status = MBOX_RET_OK;
+
+	/* Clear the SDM doorbell interrupt immediately */
+	if (mmio_read_32(MBOX_OFFSET + MBOX_DOORBELL_FROM_SDM) == 1U) {
+		mmio_write_32(MBOX_OFFSET + MBOX_DOORBELL_FROM_SDM, 0U);
+	}
+
+	/* Check mailbox FIFO for any pending responses available to read. */
+	status = mailbox_response_handler_fsm();
+	if (status != MBOX_RET_OK) {
+		return status;
+	}
+
+	/*
+	 * Once we read the complete mailbox FIFO, let's mark up the bitmap for
+	 * available responses with respect to transcation IDs.
+	 */
+	status = MBOX_NO_RESPONSE;
+	spin_lock(&mbox_db_lock);
+	for (uint32_t i = 0; i < MBOX_MAX_TRANS_IDS_BITMAP; i++) {
+		bitmap[i] = mbox_svc.interrupt_bitmap[i] ^ mbox_svc.received_bitmap[i];
+		if (bitmap[i] != 0 && status == MBOX_NO_RESPONSE) {
+			status = MBOX_RET_OK;
+		}
+		mbox_svc.interrupt_bitmap[i] =  mbox_svc.received_bitmap[i];
+	}
+	spin_unlock(&mbox_db_lock);
+
+	return status;
+}
+
+int mailbox_response_poll_v3(uint8_t client_id, uint8_t job_id,
+			     uint32_t *ret_args, uint32_t *ret_args_len)
+{
+	sdm_command_t* cmd_desc = NULL;
+	sdm_response_t *resp_desc = NULL;
+	uint8_t di = 0U;
+	int status = MBOX_RET_OK;
+
+	/* Let's first check the local response queue with the given client ID and job ID */
+	resp_desc = mailbox_get_resp_desc(client_id, job_id, &di);
+	if(!resp_desc) {
+		/* Not available in the local queue, let's read mailbox FIFO */
+		status = mailbox_response_handler_fsm();
+		if (status != MBOX_RET_OK) {
+			return status;
+		}
+		resp_desc = mailbox_get_resp_desc(client_id, job_id, &di);
+	}
+	cmd_desc = mailbox_get_cmd_desc(client_id, job_id);
+
+	if (cmd_desc != NULL && resp_desc != NULL) {
+		VERBOSE("MBOX: Response found for cid %d, jid %d\n", client_id, job_id);
+		*ret_args_len = cmd_desc->cb(resp_desc, cmd_desc, ret_args);
+
+		/* Free the command and response descriptors. */
+		mailbox_free_cmd_desc(cmd_desc);
+		mailbox_free_resp_desc(di);
+
+		return MBOX_RET_OK;
+	}
+
+	ERROR("MBOX: No response found for cid: %d, jid: %d\n", client_id, job_id);
+	return MBOX_NO_RESPONSE;
+}
+
+void mailbox_init_v3(void)
+{
+	uint32_t count;
+
+	memset((void *)&mbox_svc, 0, sizeof(mbox_svc));
+
+	mbox_svc.next_resp_state = SRS_WAIT_FOR_RESP;
+	mbox_svc.resp_state = SRS_WAIT_FOR_RESP;
+
+	/* Free all entries from the response queue. */
+	for (count = 0; count < MBOX_SVC_RESP_QUEUE_SIZE; count++) {
+		mbox_svc.resp_queue[count].flags = 0;
+	}
+
+	/* Free all entries from the command queue. */
+	for (count = 0; count < MBOX_SVC_CMD_QUEUE_SIZE; count++) {
+		mbox_svc.cmd_queue[count].flags = 0;
+	}
+
+	mbox_svc.curr_di = -1;
+}
+#endif /* #if SIP_SVC_V3 */

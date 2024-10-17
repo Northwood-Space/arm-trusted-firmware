@@ -61,6 +61,10 @@ void bl31_early_platform_setup2(u_register_t arg0, u_register_t arg1,
 	console_16550_register(PLAT_INTEL_UART_BASE, PLAT_UART_CLOCK,
 			       PLAT_BAUDRATE, &console);
 
+	/* Enable TF-A BL31 logs when running from non-secure world also. */
+	console_set_scope(&console,
+		(CONSOLE_FLAG_BOOT | CONSOLE_FLAG_RUNTIME | CONSOLE_FLAG_CRASH));
+
 	setup_smmu_stream_id();
 
 	/*
@@ -173,6 +177,12 @@ void bl31_platform_setup(void)
 	gicv3_distif_init();
 	gicv3_rdistif_init(plat_my_core_pos());
 	gicv3_cpuif_enable(plat_my_core_pos());
+
+#if SIP_SVC_V3
+	/* Re-initialize the mailbox to include V3 specific routines. */
+	mailbox_init();
+#endif
+
 	mailbox_hps_stage_notify(HPS_EXECUTION_STATE_SSBL);
 }
 
@@ -290,7 +300,7 @@ void bl31_plat_set_secondary_cpu_off(void)
 
 void bl31_plat_runtime_setup(void)
 {
-	console_switch_state(CONSOLE_FLAG_RUNTIME|CONSOLE_FLAG_BOOT);
+	/* Dummy override function. */
 }
 
 void bl31_plat_enable_mmu(uint32_t flags)
