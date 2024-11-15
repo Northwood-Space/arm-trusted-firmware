@@ -62,12 +62,15 @@
 #define MBOX_HWMON_READVOLT				0x18
 #define MBOX_HWMON_READTEMP				0x19
 
-
 /* QSPI Commands */
 #define MBOX_CMD_QSPI_OPEN				0x32
 #define MBOX_CMD_QSPI_CLOSE				0x33
 #define MBOX_CMD_QSPI_SET_CS				0x34
+#define MBOX_CMD_QSPI_ERASE				0x38
+#define MBOX_CMD_QSPI_WRITE				0x39
+#define MBOX_CMD_QSPI_READ				0x3A
 #define MBOX_CMD_QSPI_DIRECT				0x3B
+#define MBOX_CMD_QSPI_GET_DEV_INFO			0x74
 
 /* SEU Commands */
 #define MBOX_CMD_SEU_ERR_READ				0x3C
@@ -95,6 +98,7 @@
 #define MBOX_FCS_ECDSA_SHA2_DATA_SIGN_VERIFY		0x87
 #define MBOX_FCS_ECDSA_GET_PUBKEY			0x88
 #define MBOX_FCS_ECDH_REQUEST				0x89
+#define MBOX_FCS_HKDF_REQUEST				0x8B
 #define MBOX_FCS_OPEN_CS_SESSION			0xA0
 #define MBOX_FCS_CLOSE_CS_SESSION			0xA1
 #define MBOX_FCS_IMPORT_CS_KEY				0xA5
@@ -113,7 +117,9 @@
 #define MBOX_GET_MEASUREMENT				0x183
 
 /* Miscellaneous commands */
+#define MBOX_CMD_MCTP_MSG				0x194
 #define MBOX_GET_ROM_PATCH_SHA384			0x1B0
+#define MBOX_CMD_GET_DEVICEID				0x500
 
 /* Mailbox Definitions */
 
@@ -223,6 +229,17 @@
 #define CONFIG_STATUS_FW_VER_OFFSET			1
 #define CONFIG_STATUS_FW_VER_MASK			0x00FFFFFF
 
+/* QSPI mailbox command macros */
+#define MBOX_QSPI_SET_CS_OFFSET				(28)
+#define MBOX_QSPI_SET_CS_MODE_OFFSET			(27)
+#define MBOX_QSPI_SET_CS_CA_OFFSET			(26)
+#define MBOX_QSPI_ERASE_SIZE_GRAN			(0x400)
+
+#define MBOX_4K_ALIGNED_MASK				(0xFFF)
+#define MBOX_IS_4K_ALIGNED(x)				((x) & MBOX_4K_ALIGNED_MASK)
+#define MBOX_IS_WORD_ALIGNED(x)				(!((x) & 0x3))
+#define MBOX_QSPI_RW_MAX_WORDS				(0x1000)
+
 /* Data structure */
 
 typedef struct mailbox_payload {
@@ -289,11 +306,11 @@ int mailbox_send_fpga_config_comp(void);
 #define MBOX_CMD_LEN_SHIFT				(12)
 #define MBOX_INDIRECT_SHIFT				(11)
 
-#define MBOX_FRAME_CMD_HEADER(client_id, job_id, args_len, indirect, cmd)		\
-				((client_id << MBOX_CLIENT_ID_SHIFT) |	\
-				(job_id << MBOX_JOB_ID_SHIFT) |		\
-				(args_len << MBOX_CMD_LEN_SHIFT) |	\
-				(indirect << MBOX_CMD_LEN_SHIFT) |	\
+#define MBOX_FRAME_CMD_HEADER(client_id, job_id, args_len, indirect, cmd)\
+				((client_id << MBOX_CLIENT_ID_SHIFT) |	 \
+				(job_id << MBOX_JOB_ID_SHIFT) |		 \
+				(args_len << MBOX_CMD_LEN_SHIFT) |	 \
+				(indirect << MBOX_CMD_LEN_SHIFT) |	 \
 				cmd)
 
 #define FLAG_SDM_RESPONSE_IS_VALID			BIT(0)
@@ -316,7 +333,8 @@ int mailbox_send_fpga_config_comp(void);
 /* Each transcation ID bitmap holds 64bits */
 #define MBOX_TRANS_ID_BITMAP_SIZE			(sizeof(uint64_t) * 8)
 /* Number of transcation ID bitmaps required to hold 256 combinations */
-#define MBOX_MAX_TRANS_IDS_BITMAP			(MBOX_MAX_TRANS_IDS / MBOX_TRANS_ID_BITMAP_SIZE)
+#define MBOX_MAX_TRANS_IDS_BITMAP			(MBOX_MAX_TRANS_IDS / \
+						MBOX_TRANS_ID_BITMAP_SIZE)
 
 /* SDM Response State (SRS) enums */
 typedef enum sdm_resp_state {
@@ -346,7 +364,8 @@ typedef struct sdm_cmd_ret_arg {
 } sdm_cmd_ret_arg_t;
 
 /* SDM client callback template */
-typedef uint8_t (*sdm_command_callback)(void *resp, void *cmd, uint32_t *ret_args);
+typedef uint8_t (*sdm_command_callback)(void *resp, void *cmd,
+					uint32_t *ret_args);
 
 /* SDM command data structure */
 typedef struct sdm_command {
