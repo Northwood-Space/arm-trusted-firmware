@@ -32,9 +32,6 @@
 #define SOCFPGA_DTB_BASE					0x80020000
 #define DT_COMPATIBLE_STR					"arm,altera socfpga agilex5"
 
-/* Define this, to support the SiPSVC V3 implementation. */
-#define SIP_SVC_V3						1
-
 /* System Counter */
 /* TODO: Update back to 400MHz.
  * This shall be updated to read from L4 clock instead of hardcoded.
