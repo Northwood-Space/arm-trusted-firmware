@@ -1051,7 +1051,7 @@ int socfpga_bridges_disable(uint32_t mask)
 					1000);
 
 		if (ret < 0) {
-			ERROR("F2S bridge fpga handshake fpgahsack: Timeout\n");
+			VERBOSE("F2S bridge fpga handshake fpgahsack: Timeout\n");
 		}
 
 		/*
@@ -1081,7 +1081,7 @@ int socfpga_bridges_disable(uint32_t mask)
 					1000);
 
 		if (ret < 0) {
-			ERROR("F2S bridge fpga handshake f2s_flush_ack: Timeout\n");
+			VERBOSE("F2S bridge fpga handshake f2s_flush_ack: Timeout\n");
 		}
 
 		/*
