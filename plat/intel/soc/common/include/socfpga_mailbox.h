@@ -318,14 +318,19 @@ int mailbox_send_fpga_config_comp(void);
 #define FLAG_SDM_RESPONSE_IS_IN_PROGRESS		BIT(2)
 #define FLAG_SDM_RESPONSE_IS_POLL_ON_INTR		BIT(3)
 
-#define MBOX_SVC_CMD_QUEUE_SIZE				(16)
+/*
+ * TODO: Re-visit this queue size based on the system load.
+ * 4 bits for client ID and 4 bits for job ID, total 8 bits and we can have up to
+ * 256 transactions. We can tune this based on our system load at any given time
+ */
+#define MBOX_SVC_CMD_QUEUE_SIZE				(32)
+#define MBOX_SVC_RESP_QUEUE_SIZE			(32)
 #define MBOX_SVC_MAX_JOB_ID				(16)
 #define MBOX_SVC_CMD_ARG_SIZE				(2)
 #define MBOX_SVC_CMD_IS_USED				BIT(0)
 #define MBOX_SVC_CMD_CB_ARGS_SIZE			(4)
 #define MBOX_SVC_MAX_CLIENTS				(16)
 #define MBOX_SVC_MAX_RESP_DATA_SIZE			(32)
-#define MBOX_SVC_RESP_QUEUE_SIZE			(16)
 #define MBOX_SVC_SMC_RET_MAX_SIZE			(8)
 
 /* Client ID(4bits) + Job ID(4bits) = Transcation ID(8bits, 256 combinations) */
